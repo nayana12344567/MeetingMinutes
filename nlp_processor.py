@@ -6,9 +6,16 @@ import spacy
 from datetime import datetime
 
 try:
-    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
-    nltk.download('punkt', quiet=True)
+    try:
+        nltk.download('punkt_tab', quiet=True)
+    except:
+        nltk.download('punkt', quiet=True)
+
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
     nltk.download('stopwords', quiet=True)
 
 from nltk.tokenize import sent_tokenize
