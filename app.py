@@ -5,6 +5,13 @@ from io import BytesIO
 from datetime import datetime
 from nlp_processor import MeetingNLPProcessor
 from export_utils import MeetingExporter
+import tempfile
+import os
+from pathlib import Path
+from audio_processing.transcribe import transcribe_audio
+from audio_processing.diarize import diarize_audio
+from summarizer.summarize import chunk_transcript, summarize_chunks, merge_summaries
+from summarizer.structure_formatter import build_structure
 
 st.set_page_config(
     page_title="AIMS - AI Meeting Summarizer",
@@ -28,7 +35,7 @@ def extract_text_from_pdf(pdf_file):
 
 def main():
     st.title("📝 AIMS - AI Meeting Summarizer")
-    st.markdown("### Rule-Based NLP System for Automated Meeting Minutes Generation")
+    st.markdown("To Ease Your Meeting Minutes Creation Process")
     st.markdown("---")
     
     if 'processed_data' not in st.session_state:
@@ -39,18 +46,20 @@ def main():
     st.sidebar.header("📄 Input Options")
     input_method = st.sidebar.radio(
         "Choose input method:",
-        ["Paste Text", "Upload PDF", "Upload Text File"]
+        ["Paste Text", "Upload PDF", "Upload Text File", "Upload Audio"]
     )
-    
+
     transcript_text = ""
-    
+    audio_temp_path = None
+    diarized = None
+
     if input_method == "Paste Text":
         st.sidebar.info("Paste your meeting transcript in the text area below")
         transcript_text = st.text_area(
             "Meeting Transcript",
             height=300,
-            placeholder="Paste your meeting transcript here...\n\nExample:\nTitle: Planning the College Technical Fest\nDate: 29/10/2025\nTime: 3:30 PM – 4:15 PM\n\nAttendees:\nSakshi – Event Coordinator\nNayana – Technical Lead\n\nThe meeting began with..."
-        )
+            placeholder="Paste your meeting transcript here...")
+    
     
     elif input_method == "Upload PDF":
         uploaded_file = st.sidebar.file_uploader("Upload PDF transcript", type=['pdf'])
@@ -65,19 +74,75 @@ def main():
             transcript_text = uploaded_file.read().decode('utf-8')
             st.success("✅ Text file loaded successfully!")
     
+    elif input_method == "Upload Audio":
+        uploaded_audio = st.sidebar.file_uploader("Upload audio file (.mp3/.wav/.m4a)", type=['mp3','wav','m4a'])
+        if uploaded_audio:
+            st.sidebar.info("Uploading and saving audio for processing...")
+            tmp_dir = os.path.join(tempfile.gettempdir(), "meeting_ai")
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            st.info("Transcription may take several minutes depending on file length and model. Please wait...")
+            with st.spinner("Transcribing audio (this can take a while)..."):
+                # use tiny model for much faster test transcriptions
+                audio_path, transcript, transcript_json = transcribe_audio(
+                    uploaded_audio, tmp_dir=tmp_dir, model_name="tiny"
+                )
+
+            # clear spinner and show immediate status
+            if not audio_path:
+                st.error(f"Failed to save uploaded audio file. {transcript.get('error','')}")
+            elif transcript.get("error"):
+                st.error(f"Transcription error: {transcript.get('error')}")
+                # expose saved transcript json for debugging if present
+                if transcript_json and os.path.exists(transcript_json):
+                    st.sidebar.markdown(f"Transcription saved: {transcript_json}")
+            else:
+                st.success("✅ Transcription complete. Running speaker diarization...")
+                segments = transcript.get("segments", [])
+                diarize_json = os.path.join(tmp_dir, Path(uploaded_audio.name).stem + "_diarized.json")
+                try:
+                    diarized = diarize_audio(audio_path, segments, out_json=diarize_json, use_pyannote=True)
+                except Exception as e:
+                    st.error(f"Diarization failed: {e}")
+                    diarized = None
+
+                # build raw transcript text for metadata extraction if diarization succeeded
+                if diarized:
+                    transcript_text = "\n".join([f"{s.get('speaker','Speaker')}: {s.get('text','')}" for s in diarized])
+                    st.success("✅ Diarization complete.")
+                    # save for debugging
+                    if transcript_json and os.path.exists(transcript_json):
+                        st.sidebar.markdown(f"Transcription saved: {transcript_json}")
+                    if diarize_json and os.path.exists(diarize_json):
+                        st.sidebar.markdown(f"Diarization saved: {diarize_json}")
+                else:
+                    # fallback to plain transcript text
+                    transcript_text = transcript.get("text","")
+
     st.sidebar.markdown("---")
     
+    # When processing, if diarized exists prefer it
     if st.sidebar.button("🔄 Process Transcript", type="primary", use_container_width=True):
-        if transcript_text.strip():
-            with st.spinner("Processing transcript using rule-based NLP..."):
-                processor = MeetingNLPProcessor()
-                processed_data = processor.process_transcript(transcript_text)
-                st.session_state.processed_data = processed_data
-                st.session_state.current_transcript = transcript_text
+        if (input_method == "Upload Audio" and diarized) or transcript_text.strip():
+            with st.spinner("Processing transcript using rule-based NLP and summarization..."):
+                # prefer diarized segments if available
+                if diarized:
+                    segments_for_summarizer = diarized
+                    full_text = transcript_text
+                else:
+                    # fall back to existing plain-text path: create simple segments
+                    full_text = transcript_text
+                    segments_for_summarizer = [{"speaker":"Speaker 1","start":0,"end":0,"text":full_text}]
+                chunks = chunk_transcript(segments_for_summarizer, max_chars=3000)
+                summaries = summarize_chunks(chunks)
+                merged = merge_summaries(summaries)
+                structured = build_structure(segments_for_summarizer, merged, full_text)
+                st.session_state.processed_data = structured
+                st.session_state.current_transcript = full_text
                 st.success("✅ Transcript processed successfully!")
                 st.rerun()
         else:
-            st.error("⚠️ Please provide a transcript first!")
+            st.error("⚠️ Please provide a transcript or audio file first!")
     
     if st.sidebar.button("🗑️ Clear All", use_container_width=True):
         st.session_state.processed_data = None
@@ -332,67 +397,32 @@ def main():
     
     else:
         st.info("👈 Please provide a meeting transcript using the sidebar and click 'Process Transcript' to generate structured minutes.")
-        
-        with st.expander("ℹ️ About AIMS - AI Meeting Summarizer"):
-            st.markdown("""
-            **AIMS** (AI Meeting Summarizer) is a rule-based NLP system that automatically generates structured minutes of meetings from transcripts.
-            
-            ### Features:
-            - **Rule-Based Processing**: Uses TF-IDF, keyword extraction, and pattern matching (no heavy ML models)
-            - **Automatic Extraction**: Identifies key topics, decisions, and action items
-            - **Structured Output**: Generates professional meeting minutes with all standard sections
-            - **Export Options**: Export to PDF or DOCX format
-            - **Editable Results**: Review and modify extracted information before export
-            
-            ### How to Use:
-            1. Choose an input method (paste text, upload PDF, or upload text file)
-            2. Provide your meeting transcript
-            3. Click "Process Transcript"
-            4. Review and edit the extracted information
-            5. Export as PDF or DOCX
-            
-            ### Processing Phases:
-            - **Phase I - Preprocessing**: Remove filler words, normalize text, apply NER
-            - **Phase II - Rule-Based Extraction**: Extract topics, decisions, and action items
-            - **Phase III - Assembly**: Generate structured minutes with verification
-            
-            ### Developed by:
-            Project Group 16 | Academic Year 2025-26
-            - Nayana K (4MW23CS080)
-            - Nikitha (4MW23CS085)
-            - Prathiksha (4MW23CS102)
-            - Sakshi H C (4MW23CS130)
-            """)
+
         
         with st.expander("📖 Sample Transcript Format"):
             st.code("""
-Title: Planning the College Technical Fest
-Date: 29/10/2025
-Time: 3:30 PM – 4:15 PM
-Venue: Main Seminar Hall
-Organizer: Technical Committee, AIMS College
-Recorder: Sakshi H.C
-
-Attendees:
-Sakshi – Event Coordinator
-Nayana – Technical Lead
-Prathiksha – Finance Head
-Nikitha – Marketing & Sponsorship Lead
-
-The meeting began with an overview of Technova 2025. Members discussed possible events such as a 24-hour hackathon, web design challenge, and robotics line follower competition.
-
-We decided to approach sponsors for financial support. The team agreed on preparing the event proposal and budget sheet by this weekend.
-
-Action Items:
-Find sponsors for additional funds - Aditya - 31/10/2025 - Pending
-Allocate ₹5,000 for workshop materials - Sakshi - 30/10/2025 - Pending
-
-Next Meeting:
-Date: 02/11/2025
-Time: 3:00 PM
-Venue: Project Lab
-Agenda: Review event progress, confirm sponsors, and finalize technical requirements.
-            """, language="text")
+[00:00:02] Sakshi: Good afternoon everyone. Let's start the meeting.
+[00:00:08] Nayana: Good afternoon. I have the draft agenda ready.
+[00:00:12] Prathiksha: Hi — I joined a bit late, sorry.
+[00:00:20] Nikitha: No problem. Sakshi, could you recap the goal for today's meeting?
+[00:00:25] Sakshi: Sure — we're planning the College Technical Fest. Today we'll discuss proposed events, sponsorship outreach, and the initial budget.
+[00:01:05] Nayana: For events, I'm proposing a 24-hour hackathon, web design challenge, and a robotics line-follower contest.
+[00:02:18] Prathiksha: Budget-wise, workshops will need ~₹5,000 for materials.
+[00:03:10] Nikitha: I'll handle sponsorship outreach. I'll prepare a sponsor list and email template.
+[00:03:45] Sakshi: Action: Nikitha to approach sponsors; deadline 31/10/2025.
+[00:04:05] Prathiksha: Action: Allocate ₹5,000 for workshop materials — Sakshi to approve by 30/10/2025.
+[00:04:40] Nayana: Next meeting scheduled for 02/11/2025 at 3:00 PM in Project Lab.
+[00:04:50] Sakshi: Thanks everyone. Meeting adjourned.
+    """, language="text")
+        
+        with st.expander("ℹ️ How to use AIMS"):
+            st.markdown("""
+            1. Select an input method in the sidebar (Paste Text / Upload PDF / Upload Text / Upload Audio).
+            2. Provide the transcript or upload the audio file.
+            3. Click "Process Transcript" to generate minutes.
+            4. Review and edit the extracted information on the page.
+            5. Export the result as PDF or DOCX using the buttons below.
+            """)
 
 if __name__ == "__main__":
     main()
