@@ -47,36 +47,50 @@ def extract_attendees(diarized_segments):
 def extract_decisions_and_actions(full_text):
     decisions = []
     actions = []
-    # look for lines with decision keywords
+    seen_decisions = set()
+    seen_actions = set()
+
     for line in full_text.splitlines():
         line = line.strip()
-        if not line:
+        if not line or len(line) < 3:
             continue
-        if re.search(r"\b(decid|decided|decision)\b", line, re.IGNORECASE):
-            decisions.append(line)
-        if re.search(r"\b(action item|action|todo|to do|task|assign)\b", line, re.IGNORECASE) or re.match(r".+-\s*[A-Z][a-z]+", line):
-            # try to parse "Task - Person - Date - Status" patterns
+
+        if re.search(r"\b(decid|decided|decision|agreed|approved|concluded|resolved)\b", line, re.IGNORECASE):
+            if line not in seen_decisions:
+                decisions.append(line)
+                seen_decisions.add(line)
+
+        if re.search(r"\b(action item|action|todo|to do|task|assign|assigned|will)\b", line, re.IGNORECASE) or re.match(r".+-\s*[A-Z][a-z]+", line):
             parts = [p.strip() for p in re.split(r"-|–", line) if p.strip()]
-            if len(parts) >= 2:
-                actions.append({
-                    "task": parts[0],
-                    "responsible": parts[1] if len(parts) > 1 else "",
-                    "deadline": parts[2] if len(parts) > 2 else "",
-                    "status": parts[3] if len(parts) > 3 else "Pending"
-                })
-            else:
-                actions.append({"task": line, "responsible": "", "deadline": "", "status": "Pending"})
-    return decisions, actions
+            task_key = parts[0][:50].lower()
+            if task_key not in seen_actions:
+                if len(parts) >= 2:
+                    actions.append({
+                        "task": parts[0],
+                        "responsible": parts[1] if len(parts) > 1 else "",
+                        "deadline": parts[2] if len(parts) > 2 else "",
+                        "status": parts[3] if len(parts) > 3 else "Pending"
+                    })
+                else:
+                    actions.append({"task": line, "responsible": "", "deadline": "", "status": "Pending"})
+                seen_actions.add(task_key)
+
+    return decisions[:15], actions[:15]
 
 def build_structure(diarized_segments, merged_summary, full_transcript_text):
+    from nlp_processor import MeetingNLPProcessor
+
     metadata = extract_metadata_from_text(full_transcript_text)
     attendees = extract_attendees(diarized_segments)
     decisions, actions = extract_decisions_and_actions(full_transcript_text + "\n" + merged_summary)
-    key_topics = []  # placeholder: topic extraction can be added
+
+    processor = MeetingNLPProcessor()
+    key_topics = processor.extract_key_topics(merged_summary)
+
     structured = {
         "metadata": metadata,
         "attendees": attendees,
-        "agenda": metadata.get("title",""),
+        "agenda": metadata.get("title", ""),
         "key_topics": key_topics,
         "summary": merged_summary,
         "decisions": decisions,
