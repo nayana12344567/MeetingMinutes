@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 from audio_processing.transcribe import transcribe_audio
 from audio_processing.diarize import diarize_audio
-from summarizer.summarize import chunk_transcript, summarize_chunks, merge_summaries
+from summarizer.summarize import chunk_transcript
+from summarizer.bart_summarizer import summarize_chunks_bart, merge_summaries_text, summarize_global
 from summarizer.structure_formatter import build_structure
 
 st.set_page_config(
@@ -18,6 +19,31 @@ st.set_page_config(
     page_icon="📝",
     layout="wide"
 )
+
+def _as_bullets(text: str):
+    try:
+        raw = (text or "").replace("\n", " ").strip()
+        if not raw:
+            return []
+        # simple sentence split; avoid heavy NLP for speed
+        parts = [p.strip() for p in raw.replace("?", ".").replace("!", ".").split(".")]
+        bullets = [p for p in parts if p]
+        # cap to reasonable number for UI readability
+        return bullets[:20]
+    except Exception:
+        return []
+
+def _sanitize(s: str) -> str:
+    try:
+        import re
+        # replace unicode block/box drawing characters with a standard small dash separator
+        t = re.sub(r"[\u2580-\u259F\u2500-\u257F\u25A0-\u25FF]+", "-", s or "")
+        # collapse long runs of dashes to '----'
+        t = re.sub(r"-\s*-+", "----", t)
+        t = re.sub(r"^-{5,}$", "----", t, flags=re.MULTILINE)
+        return t.strip()
+    except Exception:
+        return (s or "").strip()
 
 def extract_text_from_pdf(pdf_file):
     text = ""
@@ -101,7 +127,7 @@ def main():
                 segments = transcript.get("segments", [])
                 diarize_json = os.path.join(tmp_dir, Path(uploaded_audio.name).stem + "_diarized.json")
                 try:
-                    diarized = diarize_audio(audio_path, segments, out_json=diarize_json, use_pyannote=True)
+                    diarized = diarize_audio(audio_path, segments, out_json=diarize_json, use_pyannote=False)
                 except Exception as e:
                     st.error(f"Diarization failed: {e}")
                     diarized = None
@@ -124,7 +150,7 @@ def main():
     # When processing, if diarized exists prefer it
     if st.sidebar.button("🔄 Process Transcript", type="primary", use_container_width=True):
         if (input_method == "Upload Audio" and diarized) or transcript_text.strip():
-            with st.spinner("Processing transcript using rule-based NLP and summarization..."):
+            with st.spinner("Processing transcript..."):
                 # prefer diarized segments if available
                 if diarized:
                     segments_for_summarizer = diarized
@@ -133,10 +159,17 @@ def main():
                     # fall back to existing plain-text path: create simple segments
                     full_text = transcript_text
                     segments_for_summarizer = [{"speaker":"Speaker 1","start":0,"end":0,"text":full_text}]
-                chunks = chunk_transcript(segments_for_summarizer, max_chars=3000)
-                summaries = summarize_chunks(chunks)
-                merged = merge_summaries(summaries)
-                structured = build_structure(segments_for_summarizer, merged, full_text)
+                # create slightly smaller chunks for faster generation
+                chunks = chunk_transcript(segments_for_summarizer, max_chars=1600)
+                # use BART summarizer
+                summaries = summarize_chunks_bart(chunks, model_name="facebook/bart-large-cnn", device=-1)
+                merged = merge_summaries_text(summaries)
+                # produce a global, more coherent summary
+                final_summary = summarize_global(merged, model_name="facebook/bart-large-cnn", device=-1)
+                final_summary = _sanitize(final_summary)
+                # sanitize full text for metadata parsing/display
+                full_text = _sanitize(full_text)
+                structured = build_structure(segments_for_summarizer, final_summary, full_text)
                 st.session_state.processed_data = structured
                 st.session_state.current_transcript = full_text
                 st.success("✅ Transcript processed successfully!")
@@ -227,7 +260,7 @@ def main():
         
         with tab2:
             st.markdown("### 🔑 Key Topics")
-            key_topics = data.get('key_topics', [])
+            key_topics = [ _sanitize(t) for t in data.get('key_topics', []) if t ]
             if key_topics:
                 for i, topic in enumerate(key_topics):
                     data['key_topics'][i] = st.text_input(
@@ -247,9 +280,14 @@ def main():
         
         with tab3:
             st.markdown("### 📝 Discussion Summary")
-            summary = data.get('summary', '')
+            summary = _sanitize(data.get('summary', ''))
+            bullets = _as_bullets(summary)
+            if bullets:
+                st.markdown("#### Key Points")
+                st.markdown("\n".join([f"- {b}" for b in bullets]))
+                st.markdown("---")
             data['summary'] = st.text_area(
-                "Summary",
+                "Summary (editable)",
                 value=summary,
                 height=200,
                 key="summary_edit",
@@ -258,7 +296,7 @@ def main():
         
         with tab4:
             st.markdown("### ✅ Decisions")
-            decisions = data.get('decisions', [])
+            decisions = [ _sanitize(d) for d in data.get('decisions', []) ]
             if decisions:
                 for i, decision in enumerate(decisions):
                     data['decisions'][i] = st.text_area(
@@ -279,7 +317,15 @@ def main():
         
         with tab5:
             st.markdown("### 📌 Action Items")
-            action_items = data.get('action_items', [])
+            action_items = [
+                {
+                    'task': _sanitize(a.get('task','')),
+                    'responsible': _sanitize(a.get('responsible','')),
+                    'deadline': _sanitize(a.get('deadline','')),
+                    'status': _sanitize(a.get('status','Pending')),
+                }
+                for a in data.get('action_items', [])
+            ]
             if action_items:
                 for i, action in enumerate(action_items):
                     st.markdown(f"**Action Item {i+1}**")

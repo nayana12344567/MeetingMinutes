@@ -39,14 +39,29 @@ def diarize_audio(audio_path, transcript_segments, out_json=None, use_pyannote=T
         else:
             raise Exception("pyannote disabled")
     except Exception:
-        # fallback: single speaker
-        for seg in transcript_segments:
+        # lightweight heuristic fallback:
+        # 1) If segment text starts with "Name: ...", use that as speaker and strip prefix
+        # 2) Otherwise, alternate speakers when there are long gaps or keep Speaker 1
+        last_speaker = "Speaker 1"
+        for i, seg in enumerate(transcript_segments):
+            txt = (seg.get("text") or "").strip()
+            sp = last_speaker
+            # pattern: Name: content
+            try:
+                import re
+                m = re.match(r"^([A-Z][A-Za-z\.\- ]{1,30}):\s+(.*)$", txt)
+                if m:
+                    sp = m.group(1).strip()
+                    txt = m.group(2).strip()
+            except Exception:
+                pass
             diarized.append({
-                "speaker": "Speaker 1",
+                "speaker": sp,
                 "start": seg.get("start"),
                 "end": seg.get("end"),
-                "text": seg.get("text")
+                "text": txt
             })
+            last_speaker = sp
 
     if out_json:
         _save_json(diarized, out_json)
