@@ -28,21 +28,44 @@ def extract_metadata_from_text(full_text):
     return meta
 
 def extract_attendees(diarized_segments):
-    # naive: gather capitalized name-like tokens in first 5 minutes or from "Attendees:" block
-    text = " ".join([s["text"] for s in diarized_segments[:10]])
-    m = re.search(r"Attendees?:\s*(.+)", text, re.IGNORECASE)
+    """
+    Extract attendees from diarized segments.
+    Collects unique speaker names from segments and also looks for explicit attendee lists.
+    """
     attendees = []
+    seen_names = set()
+    
+    # First, collect unique speakers from segments
+    if diarized_segments:
+        for seg in diarized_segments:
+            speaker = seg.get("speaker", "")
+            if speaker and speaker not in seen_names:
+                # Check if it's a real name (not just "Speaker 1", "Speaker 2")
+                if not re.match(r'^Speaker\s+\d+$', speaker, re.IGNORECASE):
+                    attendees.append({"name": speaker, "role": ""})
+                    seen_names.add(speaker)
+    
+    # Also look for explicit "Attendees:" section in text
+    text = " ".join([s.get("text", "") for s in diarized_segments[:20]])
+    m = re.search(r"Attendees?:\s*(.+?)(?:\n\n|$)", text, re.IGNORECASE | re.DOTALL)
     if m:
         parts = re.split(r"[,\n;]+", m.group(1))
         for p in parts:
             p = p.strip()
-            if p:
-                if " - " in p or "–" in p:
-                    name, role = re.split(r" - |–", p, maxsplit=1)
-                    attendees.append({"name": name.strip(), "role": role.strip()})
+            if p and len(p) > 2:
+                if " - " in p or "–" in p or "—" in p:
+                    name_role = re.split(r"\s*[-–—]\s*", p, maxsplit=1)
+                    name = name_role[0].strip()
+                    role = name_role[1].strip() if len(name_role) > 1 else ""
+                    if name and name not in seen_names:
+                        attendees.append({"name": name, "role": role})
+                        seen_names.add(name)
                 else:
-                    attendees.append({"name": p, "role": ""})
-    return attendees
+                    if p not in seen_names:
+                        attendees.append({"name": p, "role": ""})
+                        seen_names.add(p)
+    
+    return attendees[:20]  # Limit to 20 attendees
 
 def extract_decisions_and_actions(full_text):
     decisions = []
@@ -85,7 +108,16 @@ def build_structure(diarized_segments, merged_summary, full_transcript_text):
     decisions, actions = extract_decisions_and_actions(full_transcript_text + "\n" + merged_summary)
 
     processor = MeetingNLPProcessor()
-    key_topics = processor.extract_key_topics(merged_summary)
+    # Use merged summary for key topics, but also include cleaned transcript text for better context
+    # Combine summary with cleaned transcript segments for richer topic extraction
+    text_for_topics = merged_summary
+    if diarized_segments and len(diarized_segments) > 0:
+        # Extract text from segments and clean it
+        segment_texts = [s.get('text', '') for s in diarized_segments if s.get('text')]
+        cleaned_segments = processor.preprocess_text(' '.join(segment_texts))
+        # Combine summary with cleaned segments for better topic extraction
+        text_for_topics = merged_summary + " " + cleaned_segments[:1000]  # Limit to avoid too much text
+    key_topics = processor.extract_key_topics(text_for_topics)
 
     structured = {
         "metadata": metadata,

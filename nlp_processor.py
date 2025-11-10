@@ -58,15 +58,30 @@ class MeetingNLPProcessor:
             self.nlp = spacy.load("en_core_web_sm")
     
     def preprocess_text(self, text):
-        text = re.sub(r'\[\d{2}:\d{2}:\d{2}\]', '', text)
-        text = re.sub(r'\d{2}:\d{2}:\d{2}', '', text)
-        text = re.sub(r'\[Speaker \d+\]:', '', text)
+        """
+        Clean text while preserving speaker information.
+        Removes timestamps but keeps speaker labels.
+        """
+        # Remove various timestamp formats: [HH:MM:SS], [MM:SS], HH:MM:SS, etc.
+        text = re.sub(r'\[\d{1,2}:\d{2}(?::\d{2})?\]', '', text)  # [HH:MM:SS] or [MM:SS]
+        text = re.sub(r'(?<!\d)\d{1,2}:\d{2}(?::\d{2})?(?!\d)', '', text)  # Standalone timestamps
         
+        # Remove generic speaker labels like [Speaker 1] but keep actual names
+        text = re.sub(r'\[Speaker\s+\d+\]:?', '', text, flags=re.IGNORECASE)
+        
+        # Remove filler words (but be careful not to remove important words)
         for filler in self.filler_words:
+            # Only remove if it's a standalone word, not part of another word
             text = re.sub(r'\b' + re.escape(filler) + r'\b', '', text, flags=re.IGNORECASE)
         
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'\.{2,}', '.', text)
+        # Clean up whitespace but preserve line breaks for speaker separation
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+        text = re.sub(r'\.{3,}', '...', text)  # Multiple dots to ellipsis
+        text = re.sub(r'\.{2}', '.', text)  # Double dots to single
+        
+        # Preserve speaker: text format by keeping line breaks before speaker labels
+        # Normalize speaker label format
+        text = re.sub(r'(\n|^)([A-Z][A-Za-z\.\-\s]{1,40}):\s*', r'\1\2: ', text)
         
         text = text.strip()
         return text
@@ -176,21 +191,74 @@ class MeetingNLPProcessor:
         if len(sentences) < 3:
             return []
         
+        # Common generic words to filter out
+        generic_words = {
+            'faculty', 'member', 'members', 'faculty members', 'prepared', 'preparation',
+            'exam', 'exams', 'examination', 'examinations', 'assessment', 'assessments',
+            'meeting', 'meetings', 'discussion', 'discussions', 'topic', 'topics',
+            'person', 'people', 'student', 'students', 'teacher', 'teachers',
+            'thing', 'things', 'way', 'ways', 'time', 'times', 'day', 'days',
+            'year', 'years', 'work', 'works', 'part', 'parts', 'point', 'points'
+        }
+        
         try:
+            # Use custom stop words that include common generic terms
+            custom_stop_words = set(stopwords.words('english'))
+            custom_stop_words.update(generic_words)
+            
             vectorizer = TfidfVectorizer(
-                max_features=20,
-                stop_words='english',
-                ngram_range=(1, 3),
-                min_df=1
+                max_features=30,
+                stop_words=list(custom_stop_words),
+                ngram_range=(2, 4),  # Focus on 2-4 word phrases for more meaningful topics
+                min_df=1,
+                max_df=0.8  # Filter out terms that appear in more than 80% of sentences
             )
             tfidf_matrix = vectorizer.fit_transform(sentences)
             feature_names = vectorizer.get_feature_names_out()
             
             scores = tfidf_matrix.sum(axis=0).A1
-            top_indices = scores.argsort()[-top_n:][::-1]
+            top_indices = scores.argsort()[-top_n*2:][::-1]  # Get more candidates
             
-            topics = [feature_names[i] for i in top_indices]
-            return topics
+            # Filter and select meaningful topics
+            topics = []
+            seen_roots = set()
+            for idx in top_indices:
+                topic = feature_names[idx]
+                topic_lower = topic.lower()
+                
+                # Skip if it's too generic or a substring of already selected topic
+                is_generic = any(gen in topic_lower for gen in generic_words)
+                is_substring = any(topic_lower in seen or seen in topic_lower for seen in seen_roots)
+                
+                if not is_generic and not is_substring and len(topic.split()) >= 2:
+                    topics.append(topic.title())  # Capitalize properly
+                    seen_roots.add(topic_lower)
+                    if len(topics) >= top_n:
+                        break
+            
+            # If we don't have enough, fall back to single-word important terms
+            if len(topics) < top_n:
+                vectorizer_single = TfidfVectorizer(
+                    max_features=20,
+                    stop_words='english',
+                    ngram_range=(1, 1),
+                    min_df=2
+                )
+                tfidf_single = vectorizer_single.fit_transform(sentences)
+                feature_names_single = vectorizer_single.get_feature_names_out()
+                scores_single = tfidf_single.sum(axis=0).A1
+                top_single = scores_single.argsort()[-10:][::-1]
+                
+                for idx in top_single:
+                    if len(topics) >= top_n:
+                        break
+                    term = feature_names_single[idx]
+                    term_lower = term.lower()
+                    if term_lower not in generic_words and term_lower not in seen_roots:
+                        topics.append(term.title())
+                        seen_roots.add(term_lower)
+            
+            return topics[:top_n]
         except:
             return []
     

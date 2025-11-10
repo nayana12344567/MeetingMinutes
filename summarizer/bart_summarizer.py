@@ -9,6 +9,51 @@ from typing import List, Dict
 # Cache summarization pipelines per model to avoid reloading
 _PIPELINE_CACHE: Dict[str, object] = {}
 
+def _calculate_max_length(text: str, summarizer) -> int:
+    """
+    Calculate appropriate max_length based on input text length.
+    For summarization, max_length should be ~50-60% of input length.
+    Returns a value between 50 and 500.
+    """
+    if not summarizer or not text:
+        return 200  # default fallback
+    
+    try:
+        # Try to get tokenizer from the pipeline
+        tokenizer = summarizer.tokenizer
+        if tokenizer:
+            # Tokenize the input to get actual token count
+            tokens = tokenizer.encode(text, add_special_tokens=True, truncation=False, return_tensors=None)
+            input_length = len(tokens)
+        else:
+            # Fallback: estimate tokens from characters (rough approximation: 1 token ≈ 4 chars)
+            input_length = len(text) // 4
+    except Exception:
+        # Fallback: estimate tokens from characters
+        input_length = len(text) // 4
+    
+    # Calculate max_length as 60-75% of input for better summaries, but within reasonable bounds
+    # For very short inputs, use at least 60% but minimum 80 tokens
+    # For longer inputs, cap at 600 tokens to allow more comprehensive summaries
+    if input_length < 150:
+        max_len = max(80, int(input_length * 0.65))
+    elif input_length < 500:
+        max_len = int(input_length * 0.7)
+    elif input_length < 1000:
+        max_len = int(input_length * 0.65)
+    else:
+        max_len = min(600, int(input_length * 0.6))
+    
+    return max(80, min(600, max_len))  # Ensure it's between 80 and 600
+
+def _calculate_min_length(text: str, summarizer, max_length: int) -> int:
+    """
+    Calculate appropriate min_length based on max_length.
+    Typically 25-35% of max_length, but with reasonable bounds.
+    """
+    min_len = max(40, int(max_length * 0.3))
+    return min(150, min_len)  # Cap at 150 for better summaries
+
 def get_bart_summarizer(model_name: str = "facebook/bart-large-cnn", device: int = -1):
     if not HAVE_TRANSFORMERS:
         return None
@@ -25,10 +70,12 @@ def summarize_chunks_bart(chunks: List[Dict], model_name: str = "facebook/bart-l
         text = c.get("text", "")
         if summarizer:
             try:
+                max_len = _calculate_max_length(text, summarizer)
+                min_len = _calculate_min_length(text, summarizer, max_len)
                 out = summarizer(
                     text,
-                    max_length=300,
-                    min_length=80,
+                    max_length=max_len,
+                    min_length=min_len,
                     truncation=True,
                     do_sample=False,
                     num_beams=4,
@@ -61,7 +108,9 @@ def summarize_global(text: str, model_name: str = "facebook/bart-large-cnn", dev
     if not summarizer:
         return text
     try:
-        out = summarizer(text, max_length=420, min_length=120, truncation=True, do_sample=False, num_beams=4)
+        max_len = _calculate_max_length(text, summarizer)
+        min_len = _calculate_min_length(text, summarizer, max_len)
+        out = summarizer(text, max_length=max_len, min_length=min_len, truncation=True, do_sample=False, num_beams=4)
         if isinstance(out, list) and out and "summary_text" in out[0]:
             return out[0]["summary_text"]
         return text

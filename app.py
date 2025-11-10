@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from audio_processing.transcribe import transcribe_audio
 from audio_processing.diarize import diarize_audio
+from audio_processing.transcript_parser import parse_transcript_with_timestamps, has_timestamp_format
 from summarizer.summarize import chunk_transcript
 from summarizer.bart_summarizer import summarize_chunks_bart, merge_summaries_text, summarize_global
 from summarizer.structure_formatter import build_structure
@@ -155,6 +156,15 @@ def main():
                 if diarized:
                     segments_for_summarizer = diarized
                     full_text = transcript_text
+                elif has_timestamp_format(transcript_text):
+                    # Parse transcript with timestamps and speaker names
+                    segments_for_summarizer = parse_transcript_with_timestamps(transcript_text)
+                    # Build full text with speaker labels for metadata extraction
+                    full_text = "\n".join([f"{s.get('speaker','Speaker')}: {s.get('text','')}" for s in segments_for_summarizer])
+                    if not segments_for_summarizer:
+                        # Fallback if parsing failed
+                        full_text = transcript_text
+                        segments_for_summarizer = [{"speaker":"Speaker 1","start":0,"end":0,"text":full_text}]
                 else:
                     # fall back to existing plain-text path: create simple segments
                     full_text = transcript_text
@@ -329,13 +339,15 @@ def main():
             if action_items:
                 for i, action in enumerate(action_items):
                     st.markdown(f"**Action Item {i+1}**")
-                    col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                    col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
                     
                     with col1:
-                        action_items[i]['task'] = st.text_input(
+                        action_items[i]['task'] = st.text_area(
                             "Task",
                             value=action.get('task', ''),
-                            key=f"task_{i}"
+                            key=f"task_{i}",
+                            height=60,
+                            help="Enter the action item task description"
                         )
                     with col2:
                         action_items[i]['responsible'] = st.text_input(
@@ -445,21 +457,6 @@ def main():
         st.info("👈 Please provide a meeting transcript using the sidebar and click 'Process Transcript' to generate structured minutes.")
 
         
-        with st.expander("📖 Sample Transcript Format"):
-            st.code("""
-[00:00:02] Sakshi: Good afternoon everyone. Let's start the meeting.
-[00:00:08] Nayana: Good afternoon. I have the draft agenda ready.
-[00:00:12] Prathiksha: Hi — I joined a bit late, sorry.
-[00:00:20] Nikitha: No problem. Sakshi, could you recap the goal for today's meeting?
-[00:00:25] Sakshi: Sure — we're planning the College Technical Fest. Today we'll discuss proposed events, sponsorship outreach, and the initial budget.
-[00:01:05] Nayana: For events, I'm proposing a 24-hour hackathon, web design challenge, and a robotics line-follower contest.
-[00:02:18] Prathiksha: Budget-wise, workshops will need ~₹5,000 for materials.
-[00:03:10] Nikitha: I'll handle sponsorship outreach. I'll prepare a sponsor list and email template.
-[00:03:45] Sakshi: Action: Nikitha to approach sponsors; deadline 31/10/2025.
-[00:04:05] Prathiksha: Action: Allocate ₹5,000 for workshop materials — Sakshi to approve by 30/10/2025.
-[00:04:40] Nayana: Next meeting scheduled for 02/11/2025 at 3:00 PM in Project Lab.
-[00:04:50] Sakshi: Thanks everyone. Meeting adjourned.
-    """, language="text")
         
         with st.expander("ℹ️ How to use AIMS"):
             st.markdown("""

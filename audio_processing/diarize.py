@@ -41,20 +41,54 @@ def diarize_audio(audio_path, transcript_segments, out_json=None, use_pyannote=T
     except Exception:
         # lightweight heuristic fallback:
         # 1) If segment text starts with "Name: ...", use that as speaker and strip prefix
-        # 2) Otherwise, alternate speakers when there are long gaps or keep Speaker 1
-        last_speaker = "Speaker 1"
+        # 2) Extract speaker names from transcript patterns
+        # 3) Track unique speakers and assign them properly
+        import re
+        speakers_seen = {}  # Map speaker name to speaker label
+        speaker_counter = 1
+        last_speaker = None
+        
         for i, seg in enumerate(transcript_segments):
             txt = (seg.get("text") or "").strip()
-            sp = last_speaker
-            # pattern: Name: content
-            try:
-                import re
-                m = re.match(r"^([A-Z][A-Za-z\.\- ]{1,30}):\s+(.*)$", txt)
-                if m:
-                    sp = m.group(1).strip()
-                    txt = m.group(2).strip()
-            except Exception:
-                pass
+            sp = None
+            
+            # Pattern 1: "Name: content" at start of text
+            m = re.match(r"^([A-Z][A-Za-z\.\- ]{1,30}):\s+(.*)$", txt)
+            if m:
+                sp_name = m.group(1).strip()
+                txt = m.group(2).strip()
+                # Normalize speaker name (remove common prefixes/suffixes)
+                sp_name = re.sub(r'\s+', ' ', sp_name)
+                if sp_name not in speakers_seen:
+                    speakers_seen[sp_name] = f"Speaker {speaker_counter}"
+                    speaker_counter += 1
+                sp = speakers_seen[sp_name]
+            else:
+                # Pattern 2: Look for speaker labels in brackets like [Speaker 1] or [Name]
+                bracket_match = re.search(r'\[(?:Speaker\s+)?([A-Z][A-Za-z\.\- ]{1,30}|Speaker\s+\d+)\]', txt)
+                if bracket_match:
+                    sp_name = bracket_match.group(1).strip()
+                    txt = re.sub(r'\[(?:Speaker\s+)?[A-Z][A-Za-z\.\- ]{1,30}|Speaker\s+\d+\]', '', txt).strip()
+                    if sp_name not in speakers_seen:
+                        speakers_seen[sp_name] = f"Speaker {speaker_counter}"
+                        speaker_counter += 1
+                    sp = speakers_seen[sp_name]
+                # Pattern 3: Look for "SPEAKER_NAME:" pattern anywhere in text
+                elif ':' in txt:
+                    colon_parts = txt.split(':', 1)
+                    potential_name = colon_parts[0].strip()
+                    if len(potential_name) > 2 and len(potential_name) < 40 and re.match(r'^[A-Z][A-Za-z\.\- ]+$', potential_name):
+                        sp_name = potential_name
+                        txt = colon_parts[1].strip() if len(colon_parts) > 1 else txt
+                        if sp_name not in speakers_seen:
+                            speakers_seen[sp_name] = f"Speaker {speaker_counter}"
+                            speaker_counter += 1
+                        sp = speakers_seen[sp_name]
+            
+            # If no speaker found, use last speaker or default to Speaker 1
+            if not sp:
+                sp = last_speaker if last_speaker else "Speaker 1"
+            
             diarized.append({
                 "speaker": sp,
                 "start": seg.get("start"),
