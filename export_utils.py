@@ -1,9 +1,6 @@
-# ============================
-#  Final Version – Minutes of Meeting Exporter
-# ============================
-
+# export_utils.py (final fixed version)
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -18,7 +15,6 @@ from reportlab.platypus import (
 from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
-from transformers import BartTokenizer, BartForConditionalGeneration
 from datetime import datetime
 from io import BytesIO
 import re
@@ -27,101 +23,115 @@ import os
 
 class MeetingExporter:
     def __init__(self, header_image_path="college_header.jpg"):
-        """
-        header_image_path: The banner/header image for the top of PDF & DOCX.
-        """
         self.header_image_path = header_image_path
 
-        # Load BART model (only once)
-        self.tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
-        self.model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
-
     # --------------------------
-    # BASIC CLEANERS
+    # Helpers / Cleaners
     # --------------------------
-
     @staticmethod
     def _sanitize(text: str) -> str:
-        """Remove strange characters, normalize spacing."""
         if not text:
             return ""
-        text = re.sub(r"[\u2580-\u259F\u2500-\u257F\u25A0-\u25FF]+", "-", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
+        t = re.sub(r"[\u2580-\u259F\u2500-\u257F\u25A0-\u25FF]+", "-", text)
+        t = re.sub(r"\s+", " ", t)
+        t = t.strip()
+        return t
 
     @staticmethod
     def _clean_action_text(text: str) -> str:
-        """Light cleanup for task text before NLP rewriting."""
         if not text:
             return ""
-        text = re.sub(r"\b(ma|ma\.|am|am\.)\b", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip(" .,-")
+        t = re.sub(r"\b(ma|ma\.|am|am\.)\b", "", text, flags=re.IGNORECASE)
+        t = re.sub(r"\s+", " ", t)
+        t = t.strip(" .,-")
+        return t
 
     # --------------------------
-    # NLP REWRITING
+    # Rule-based sentence builders (NO MODEL)
     # --------------------------
-
-    def _rewrite_action_sentence(self, task, responsible="", deadline=""):
+    def _format_action_sentence(self, task: str, responsible: str = "", deadline: str = "") -> str:
         """
-        Converts task+responsible+deadline into a CLEAN PROFESSIONAL SENTENCE.
-        No status.
-        Example: "John will prepare the budget report by Monday."
+        Build a single natural sentence for an action item using simple rules:
+        - If responsible exists: "<Responsible> will <task> [by <deadline>]."
+        - If no responsible: "The concerned staff will <task> [by <deadline>]."
+        - Capitalize first letter; ensure task is in infinitive-like form (best-effort).
         """
+        task = self._clean_action_text(task).strip()
+        responsible = self._sanitize(responsible).strip()
+        deadline = self._sanitize(deadline).strip()
 
-        prompt = (
-            "Rewrite the following action item into a single clear, formal, "
-            "professional sentence appropriate for college meeting minutes.\n\n"
-            f"Task: {task}\n"
-        )
-
-        if responsible:
-            prompt += f"Responsible: {responsible}\n"
-        if deadline:
-            prompt += f"Deadline: {deadline}\n"
-
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-
-        summary_ids = self.model.generate(
-            inputs["input_ids"],
-            num_beams=4,
-            max_length=40,
-            min_length=10,
-            no_repeat_ngram_size=3,
-            early_stopping=True
-        )
-
-        sentence = self.tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-        return sentence.strip()
-
-    def _rewrite_summary_formal(self, summary_text: str) -> str:
-        cleaned = self._sanitize(summary_text)
-        if not cleaned:
+        if not task:
             return ""
 
-        # Split into sentences, clean and rejoin nicely
-        sentences = [s.strip().capitalize() for s in re.split(r'(?<=[.!?])\s+', cleaned) if s.strip()]
-        joined = " ".join(sentences)
+        # make sure task is not sentence-starting with a capital duplicated; lower-case start for "will"
+        # If task already starts with a verb like "prepare", we keep it; if it starts with "to prepare", strip leading "to "
+        task_for_sentence = re.sub(r'^\s*to\s+', '', task, flags=re.IGNORECASE)
 
-        formal = f"The meeting was convened to discuss the following points: {joined}"
+        # ensure the task ends without trailing punctuation
+        task_for_sentence = task_for_sentence.rstrip(". ")
+
+        if responsible:
+            subject = responsible
+        else:
+            subject = "The concerned staff"
+
+        sentence = f"{subject} will {task_for_sentence}"
+        if deadline:
+            sentence = f"{sentence} by {deadline}"
+        sentence = sentence.strip()
+        # Add final period if missing
+        if not sentence.endswith("."):
+            sentence += "."
+        # Capitalize first char
+        sentence = sentence[0].upper() + sentence[1:]
+        return sentence
+
+    def _formal_summary_from_text(self, summary_text: str) -> str:
+        """
+        Build a formal, single-paragraph summary from the raw summary text.
+        This is deterministic and rule-based (no external model).
+        """
+        s = self._sanitize(summary_text)
+        if not s:
+            return ""
+
+        # Split into sentences by punctuation, then clean and join as formal paragraph
+        parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', s) if p.strip()]
+        # Capitalize each part and ensure it ends with a period
+        cleaned_parts = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            # ensure punctuation at end
+            if not re.search(r'[.!?]$', p):
+                p = p + "."
+            p = p[0].upper() + p[1:]
+            cleaned_parts.append(p)
+
+        # If very short, expand slightly with templated connectors
+        if len(cleaned_parts) == 1:
+            formal = f"The meeting was convened to discuss the following: {cleaned_parts[0]}"
+        else:
+            # join parts into a single paragraph with transitions for professionalism
+            formal = "The meeting was convened to discuss the following points. "
+            formal += " ".join(cleaned_parts)
         return formal
 
     # --------------------------
-    # HEADER IMAGE HELPERS
+    # Header helpers
     # --------------------------
-
     def _add_docx_header(self, doc: Document):
-        """Adds header image to DOCX if available."""
-        if os.path.exists(self.header_image_path):
+        if self.header_image_path and os.path.exists(self.header_image_path):
             try:
-                img = doc.add_picture(self.header_image_path, width=Inches(6.5))
+                pic = doc.add_picture(self.header_image_path, width=Inches(6.5))
                 doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
             except Exception:
+                # if image fails, ignore silently
                 pass
 
     def _add_pdf_header(self, story):
-        """Adds header image to PDF if available."""
-        if os.path.exists(self.header_image_path):
+        if self.header_image_path and os.path.exists(self.header_image_path):
             try:
                 img = RLImage(self.header_image_path, width=6.5 * inch)
                 story.append(img)
@@ -129,113 +139,93 @@ class MeetingExporter:
             except Exception:
                 pass
 
-# ============================
-#  DOCX EXPORT SECTION
-# ============================
-
-    # ---------------------------------------------------------
-    #                    DOCX EXPORT
-    # ---------------------------------------------------------
-
+    # --------------------------
+    # DOCX Export
+    # --------------------------
     def export_to_docx(self, meeting_data):
-        """
-        Generates a DOCX Minutes of Meeting document with:
-        - Header image
-        - Formal summary
-        - Agenda table
-        - Rewritten natural action items
-        """
         doc = Document()
 
-        # Add header image
+        # Header image
         self._add_docx_header(doc)
 
         # Title
-        title = doc.add_heading("Minutes of Meeting", level=0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
+        title_heading = doc.add_heading("Minutes of Meeting", 0)
+        title_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph()
 
-        # ----------------------------
-        # METADATA
-        # ----------------------------
         metadata = meeting_data.get("metadata", {})
-
-        def add_meta(label, key):
-            if metadata.get(key):
-                p = doc.add_paragraph()
-                p.add_run(f"{label}: ").bold = True
-                p.add_run(str(metadata[key]))
-
-        add_meta("Title", "title")
-        add_meta("Date", "date")
-        add_meta("Time", "time")
-        add_meta("Venue", "venue")
-        add_meta("Organizer", "organizer")
-        add_meta("Recorder", "recorder")
+        if metadata.get("title"):
+            p = doc.add_paragraph()
+            p.add_run("Title: ").bold = True
+            p.add_run(str(metadata.get("title")))
+        if metadata.get("date"):
+            p = doc.add_paragraph()
+            p.add_run("Date: ").bold = True
+            p.add_run(str(metadata.get("date")))
+        if metadata.get("time"):
+            p = doc.add_paragraph()
+            p.add_run("Time: ").bold = True
+            p.add_run(str(metadata.get("time")))
+        if metadata.get("venue"):
+            p = doc.add_paragraph()
+            p.add_run("Venue: ").bold = True
+            p.add_run(str(metadata.get("venue")))
+        if metadata.get("organizer"):
+            p = doc.add_paragraph()
+            p.add_run("Organizer: ").bold = True
+            p.add_run(str(metadata.get("organizer")))
+        if metadata.get("recorder"):
+            p = doc.add_paragraph()
+            p.add_run("Recorder: ").bold = True
+            p.add_run(str(metadata.get("recorder")))
 
         doc.add_paragraph("----")
 
-        # ----------------------------
-        # ATTENDEES
-        # ----------------------------
+        # Attendees
         attendees = meeting_data.get("attendees", [])
         if attendees:
             doc.add_heading("Attendees", level=2)
-            for person in attendees:
-                name = self._sanitize(person.get("name", ""))
-                role = self._sanitize(person.get("role", ""))
+            for a in attendees:
+                name = self._sanitize(a.get("name", ""))
+                role = self._sanitize(a.get("role", ""))
                 if role:
                     doc.add_paragraph(f"{name} – {role}", style="List Bullet")
                 else:
                     doc.add_paragraph(name, style="List Bullet")
             doc.add_paragraph("----")
 
-        # ----------------------------
-        # AGENDA TABLE
-        # ----------------------------
+        # Agenda table
         agenda = meeting_data.get("agenda", [])
         if agenda:
             doc.add_heading("Agenda", level=2)
-
             table = doc.add_table(rows=1, cols=3)
             table.style = "Light Grid Accent 1"
-
             hdr = table.rows[0].cells
             hdr[0].text = "Agenda No."
             hdr[1].text = "Discussion & Action to be taken"
             hdr[2].text = "Responsibility"
-
             # bold header
             for cell in hdr:
                 for p in cell.paragraphs:
                     for run in p.runs:
                         run.font.bold = True
-
             # rows
             for item in agenda:
                 row = table.add_row().cells
                 row[0].text = str(item.get("no", ""))
                 row[1].text = self._sanitize(item.get("discussion", ""))
                 row[2].text = self._sanitize(item.get("responsibility", ""))
-
             doc.add_paragraph("----")
 
-        # ----------------------------
-        # DISCUSSION SUMMARY  (FORMAL REWRITE)
-        # ----------------------------
+        # Discussion Summary (formal)
         summary = meeting_data.get("summary", "")
         if summary:
             doc.add_heading("Discussion Summary", level=2)
-
-            rewritten = self._rewrite_summary_formal(summary)
-            doc.add_paragraph(rewritten)
-
+            formal = self._formal_summary_from_text(summary)
+            doc.add_paragraph(formal)
             doc.add_paragraph("----")
 
-        # ----------------------------
-        # DECISIONS
-        # ----------------------------
+        # Decisions
         decisions = meeting_data.get("decisions", [])
         if decisions:
             doc.add_heading("Decisions", level=2)
@@ -243,299 +233,178 @@ class MeetingExporter:
                 doc.add_paragraph(self._sanitize(d), style="List Bullet")
             doc.add_paragraph("----")
 
-        # ----------------------------
-        # ACTION ITEMS (Formal rewritten sentences, no status)
-        # ----------------------------
+        # Action Items (rule-based sentences)
         action_items = meeting_data.get("action_items", [])
         if action_items:
             doc.add_heading("Action Items", level=2)
-
-            for action in action_items:
-                task = self._clean_action_text(self._sanitize(action.get("task", "")))
-                responsible = self._sanitize(action.get("responsible", ""))
-                deadline = self._sanitize(action.get("deadline", ""))
-
-                rewritten = self._rewrite_action_sentence(task, responsible, deadline)
-                doc.add_paragraph(f"• {rewritten}")
-
+            for a in action_items:
+                task = a.get("task", "")
+                responsible = a.get("responsible", "")
+                deadline = a.get("deadline", "")
+                sentence = self._format_action_sentence(task, responsible, deadline)
+                if sentence:
+                    doc.add_paragraph(f"• {sentence}")
             doc.add_paragraph("----")
 
-        # ----------------------------
-        # NEXT MEETING
-        # ----------------------------
+        # Next meeting
         next_meeting = meeting_data.get("next_meeting", {})
         if any(next_meeting.values()):
             doc.add_heading("Next Meeting", level=2)
-
-            def nm(label, key):
-                if next_meeting.get(key):
-                    p = doc.add_paragraph()
-                    p.add_run(f"{label}: ").bold = True
-                    p.add_run(str(next_meeting[key]))
-
-            nm("Date", "date")
-            nm("Time", "time")
-            nm("Venue", "venue")
-            nm("Agenda", "agenda")
-
+            if next_meeting.get("date"):
+                p = doc.add_paragraph(); p.add_run("Date: ").bold = True; p.add_run(str(next_meeting.get("date")))
+            if next_meeting.get("time"):
+                p = doc.add_paragraph(); p.add_run("Time: ").bold = True; p.add_run(str(next_meeting.get("time")))
+            if next_meeting.get("venue"):
+                p = doc.add_paragraph(); p.add_run("Venue: ").bold = True; p.add_run(str(next_meeting.get("venue")))
+            if next_meeting.get("agenda"):
+                p = doc.add_paragraph(); p.add_run("Agenda: ").bold = True; p.add_run(str(next_meeting.get("agenda")))
             doc.add_paragraph("─" * 50)
 
-        # ----------------------------
-        # CLOSING NOTE
-        # ----------------------------
+        # Closing note
         doc.add_heading("Closing Note", level=2)
-        closing = (
-            "This document was generated by the AIMS – AI Meeting Summarizer "
-            f"on {datetime.now().strftime('%d/%m/%Y at %H:%M')}."
-        )
+        closing = f"Meeting minutes generated on {datetime.now().strftime('%d/%m/%Y at %H:%M')}."
         doc.add_paragraph(closing)
 
-        # save
-        buffer = BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        return buffer
+        buf = BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf
 
-# ============================
-#  export_utils.py (PART 3)
-#  PDF EXPORT SECTION
-# ============================
-
-    # ---------------------------------------------------------
-    #                    PDF EXPORT
-    # ---------------------------------------------------------
-
+    # --------------------------
+    # PDF Export
+    # --------------------------
     def export_to_pdf(self, meeting_data):
-        """
-        Generates a PDF Minutes of Meeting document with:
-        - Header image
-        - Agenda table
-        - Formal rewritten summary
-        - Rewritten natural action items
-        """
         buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter,
+                                rightMargin=72, leftMargin=72,
+                                topMargin=72, bottomMargin=20)
 
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=letter,
-            rightMargin=72,
-            leftMargin=72,
-            topMargin=72,
-            bottomMargin=20
-        )
-
-        # ----------------------------
-        # STYLES
-        # ----------------------------
         styles = getSampleStyleSheet()
-
-        styles.add(ParagraphStyle(
-            name="TitleStyle",
-            fontSize=20,
-            leading=24,
-            alignment=TA_CENTER,
-            textColor=colors.HexColor("#1a237e"),
-            spaceAfter=30
-        ))
-
-        styles.add(ParagraphStyle(
-            name="HeadingStyle",
-            parent=styles["Heading2"],
-            fontSize=14,
-            leading=16,
-            textColor=colors.HexColor("#283593"),
-            spaceAfter=12,
-            spaceBefore=12
-        ))
-
-        styles.add(ParagraphStyle(
-            name="BodyStyle",
-            parent=styles["BodyText"],
-            fontSize=11,
-            leading=14,
-            spaceAfter=6
-        ))
-
-        styles.add(ParagraphStyle(
-            name="TableBody",
-            parent=styles["BodyText"],
-            fontSize=10,
-            leading=12
-        ))
+        styles.add(ParagraphStyle(name="TitleStyle", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=18))
+        styles.add(ParagraphStyle(name="HeadingStyle", parent=styles["Heading2"], fontSize=14, leading=16, spaceAfter=12))
+        styles.add(ParagraphStyle(name="BodyStyle", parent=styles["BodyText"], fontSize=11, leading=14, spaceAfter=6))
+        styles.add(ParagraphStyle(name="TableBody", parent=styles["BodyText"], fontSize=10, leading=12))
 
         story = []
-
-        # ----------------------------
-        # HEADER IMAGE
-        # ----------------------------
+        # header image
         self._add_pdf_header(story)
 
-        # ----------------------------
-        # TITLE
-        # ----------------------------
+        # title
         story.append(Paragraph("Minutes of Meeting", styles["TitleStyle"]))
         story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # METADATA
-        # ----------------------------
+        # metadata
         metadata = meeting_data.get("metadata", {})
-
         def add_meta(label, key):
             if metadata.get(key):
-                story.append(Paragraph(f"<b>{label}:</b> {metadata[key]}", styles["BodyStyle"]))
-
+                story.append(Paragraph(f"<b>{label}:</b> {self._sanitize(metadata.get(key))}", styles["BodyStyle"]))
         add_meta("Title", "title")
         add_meta("Date", "date")
         add_meta("Time", "time")
         add_meta("Venue", "venue")
         add_meta("Organizer", "organizer")
         add_meta("Recorder", "recorder")
-
         story.append(Spacer(1, 12))
         story.append(Paragraph("----", styles["BodyStyle"]))
         story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # ATTENDEES
-        # ----------------------------
+        # attendees
         attendees = meeting_data.get("attendees", [])
         if attendees:
             story.append(Paragraph("Attendees", styles["HeadingStyle"]))
-            for person in attendees:
-                name = self._sanitize(person.get("name", ""))
-                role = self._sanitize(person.get("role", ""))
+            for a in attendees:
+                name = self._sanitize(a.get("name", ""))
+                role = self._sanitize(a.get("role", ""))
                 if role:
                     story.append(Paragraph(f"• {name} – {role}", styles["BodyStyle"]))
                 else:
                     story.append(Paragraph(f"• {name}", styles["BodyStyle"]))
-
             story.append(Spacer(1, 12))
             story.append(Paragraph("----", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # AGENDA TABLE
-        # ----------------------------
+        # agenda table
         agenda = meeting_data.get("agenda", [])
         if agenda:
             story.append(Paragraph("Agenda", styles["HeadingStyle"]))
-
-            table_data = [
-                ["Agenda No.", "Discussion & Action to be taken", "Responsibility"]
-            ]
-
+            table_data = [["Agenda No.", "Discussion & Action to be taken", "Responsibility"]]
             for item in agenda:
-                table_data.append([
-                    str(item.get("no", "")),
-                    self._sanitize(item.get("discussion", "")),
-                    self._sanitize(item.get("responsibility", ""))
-                ])
-
-            table = Table(
-                table_data,
-                colWidths=[60, 330, 110]
-            )
-
+                table_data.append([str(item.get("no","")), self._sanitize(item.get("discussion","")), self._sanitize(item.get("responsibility",""))])
+            table = Table(table_data, colWidths=[60, 330, 110])
             table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EAF6")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 10),
-                ("GRID", (0, 0), (-1, -1), 0.7, colors.grey),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 1), (-1, -1), 10),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#E8EAF6")),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+                ('ALIGN', (0,0), (-1,0), 'CENTER'),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0,0), (-1,0), 10),
+                ('GRID', (0,0), (-1,-1), 0.7, colors.grey),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
+                ('FONTSIZE', (0,1), (-1,-1), 10),
+                ('LEFTPADDING', (0,0), (-1,-1), 4),
+                ('RIGHTPADDING', (0,0), (-1,-1), 4),
             ]))
-
             story.append(table)
             story.append(Spacer(1, 18))
             story.append(Paragraph("----", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # DISCUSSION SUMMARY (FORMAL REWRITE)
-        # ----------------------------
+        # discussion summary (formal)
         summary = meeting_data.get("summary", "")
         if summary:
             story.append(Paragraph("Discussion Summary", styles["HeadingStyle"]))
-
-            rewritten = self._rewrite_summary_formal(summary)
-            story.append(Paragraph(rewritten, styles["BodyStyle"]))
-
+            formal = self._formal_summary_from_text(summary)
+            story.append(Paragraph(formal, styles["BodyStyle"]))
             story.append(Spacer(1, 12))
             story.append(Paragraph("----", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # DECISIONS
-        # ----------------------------
+        # decisions
         decisions = meeting_data.get("decisions", [])
         if decisions:
             story.append(Paragraph("Decisions", styles["HeadingStyle"]))
-            for dec in decisions:
-                story.append(Paragraph(f"• {self._sanitize(dec)}", styles["BodyStyle"]))
-
+            for d in decisions:
+                story.append(Paragraph(f"• {self._sanitize(d)}", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
             story.append(Paragraph("----", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # ACTION ITEMS (Rewritten sentences)
-        # ----------------------------
+        # action items (rule-based)
         action_items = meeting_data.get("action_items", [])
         if action_items:
             story.append(Paragraph("Action Items", styles["HeadingStyle"]))
-
-            for action in action_items:
-                task = self._clean_action_text(self._sanitize(action.get("task", "")))
-                responsible = self._sanitize(action.get("responsible", ""))
-                deadline = self._sanitize(action.get("deadline", ""))
-
-                rewritten = self._rewrite_action_sentence(task, responsible, deadline)
-                story.append(Paragraph(f"• {rewritten}", styles["BodyStyle"]))
-
+            for a in action_items:
+                task = a.get("task","")
+                responsible = a.get("responsible","")
+                deadline = a.get("deadline","")
+                sentence = self._format_action_sentence(task, responsible, deadline)
+                if sentence:
+                    story.append(Paragraph(f"• {sentence}", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
             story.append(Paragraph("----", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # NEXT MEETING
-        # ----------------------------
+        # next meeting
         next_meeting = meeting_data.get("next_meeting", {})
         if any(next_meeting.values()):
             story.append(Paragraph("Next Meeting", styles["HeadingStyle"]))
-
-            def nm(label, key):
-                if next_meeting.get(key):
-                    story.append(
-                        Paragraph(f"<b>{label}:</b> {next_meeting[key]}", styles["BodyStyle"])
-                    )
-
-            nm("Date", "date")
-            nm("Time", "time")
-            nm("Venue", "venue")
-            nm("Agenda", "agenda")
-
+            if next_meeting.get("date"):
+                story.append(Paragraph(f"<b>Date:</b> {self._sanitize(next_meeting.get('date'))}", styles["BodyStyle"]))
+            if next_meeting.get("time"):
+                story.append(Paragraph(f"<b>Time:</b> {self._sanitize(next_meeting.get('time'))}", styles["BodyStyle"]))
+            if next_meeting.get("venue"):
+                story.append(Paragraph(f"<b>Venue:</b> {self._sanitize(next_meeting.get('venue'))}", styles["BodyStyle"]))
+            if next_meeting.get("agenda"):
+                story.append(Paragraph(f"<b>Agenda:</b> {self._sanitize(next_meeting.get('agenda'))}", styles["BodyStyle"]))
             story.append(Spacer(1, 12))
-            story.append(Paragraph("─" * 90, styles["BodyStyle"]))
+            story.append(Paragraph("─" * 80, styles["BodyStyle"]))
             story.append(Spacer(1, 12))
 
-        # ----------------------------
-        # CLOSING NOTE
-        # ----------------------------
+        # closing
         story.append(Paragraph("Closing Note", styles["HeadingStyle"]))
-
-        closing = (
-            "This document was generated by the AIMS – AI Meeting Summarizer "
-            f"on {datetime.now().strftime('%d/%m/%Y at %H:%M')}."
-        )
+        closing = f"Meeting minutes generated on {datetime.now().strftime('%d/%m/%Y at %H:%M')}."
         story.append(Paragraph(closing, styles["BodyStyle"]))
 
-        # Build PDF
         doc.build(story)
         buffer.seek(0)
         return buffer

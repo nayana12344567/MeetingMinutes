@@ -177,8 +177,6 @@ def build_structure(diarized_segments, merged_summary, full_transcript_text):
         "decisions": decisions,
         "action_items": actions,
         "next_meeting": {},
-        "keywords": keywords,
-        "entity_actions": entity_actions
     }
 
     return structured

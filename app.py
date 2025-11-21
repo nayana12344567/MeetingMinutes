@@ -75,8 +75,8 @@ def main():
     
     page = st.sidebar.radio(
         "Navigation",
-        ["Home", "Upload & Transcribe", "Summary", "Analytics Dashboard", "Export", "Settings"],
-        index=["Home", "Upload & Transcribe", "Summary", "Analytics Dashboard", "Export", "Settings"].index(st.session_state.current_page) if st.session_state.current_page in ["Home", "Upload & Transcribe", "Summary", "Analytics Dashboard", "Export", "Settings"] else 0
+        ["Home", "Upload & Transcribe", "Summary","Export"],
+        index=["Home", "Upload & Transcribe", "Summary","Export"].index(st.session_state.current_page) if st.session_state.current_page in ["Home", "Upload & Transcribe", "Summary","Export"] else 0
     )
     
     st.session_state.current_page = page
@@ -88,12 +88,8 @@ def main():
         upload_transcribe_page()
     elif page == "Summary":
         summary_page()
-    elif page == "Analytics Dashboard":
-        analytics_dashboard_page()
     elif page == "Export":
         export_page()
-    elif page == "Settings":
-        settings_page()
 
 def home_page():
     st.title("📝 AIMS - AI Meeting Summarizer")
@@ -118,7 +114,6 @@ def home_page():
     - 🎤 **Audio Transcription**: Automatic transcription with speaker diarization
     - 🧠 **AI-Powered Summarization**: Extract key topics, decisions, and action items
     - 👥 **Attendee Detection**: Automatically identify meeting participants
-    - 📊 **Analytics Dashboard**: View insights and statistics
     - 📧 **Email Integration**: Send summaries directly to attendees
     """)
     
@@ -306,15 +301,15 @@ def summary_page():
     st.markdown("---")
     
     # -------------------- TABS --------------------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "👥 Attendees", 
-        "📌 Agenda", 
-        "📝 Summary", 
-        "✅ Decisions", 
-        "📌 Action Items", 
-        "📅 Next Meeting",
-        "🧠 Insights"
-    ])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "👥 Attendees", 
+    "📌 Agenda", 
+    "📝 Summary", 
+    "✅ Decisions", 
+    "📌 Action Items", 
+    "📅 Next Meeting",
+])
+
     
     # -------------------- TAB 1: ATTENDEES --------------------
     with tab1:
@@ -416,31 +411,34 @@ def summary_page():
                 }]
                 st.rerun()
 
-            # -------------------- TAB 3: SUMMARY --------------------
+    # -------------------- TAB 3: SUMMARY --------------------
     with tab3:
         st.markdown("### 📝 Discussion Summary")
 
         raw_summary = _sanitize(data.get("summary", ""))
 
-        # Build a simple "formal" style paragraph from the raw summary
+        # Build deterministic formal summary (no ML model used here)
         if raw_summary:
-            # Split into sentences and tidy
-            import re
-            sentences = [s.strip().capitalize() for s in re.split(r'(?<=[.!?])\s+', raw_summary) if s.strip()]
-            joined = " ".join(sentences)
-
-            formal_summary = f"The meeting was convened to discuss the following points: {joined}"
+            # Split into sentence-like parts and tidy them
+            parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', raw_summary) if p.strip()]
+            cleaned = []
+            for p in parts:
+                q = p.strip()
+                if not re.search(r'[.!?]$', q):
+                    q = q + "."
+                q = q[0].upper() + q[1:]
+                cleaned.append(q)
+            if len(cleaned) == 1:
+                formal_summary = f"The meeting was convened to discuss the following: {cleaned[0]}"
+            else:
+                formal_summary = "The meeting was convened to discuss the following points. " + " ".join(cleaned)
 
             st.markdown("#### 📘 Formal Summary (Auto-Generated Preview)")
-            st.markdown(
-                f"<p style='text-align: justify;'>{formal_summary}</p>",
-                unsafe_allow_html=True
-            )
+            st.markdown(f"<p style='text-align: justify;'>{formal_summary}</p>", unsafe_allow_html=True)
             st.markdown("---")
         else:
             formal_summary = ""
 
-        # Editable underlying summary (this is what gets stored)
         st.markdown("#### ✏️ Edit Source Summary (Will Influence Final Output)")
         updated_raw = st.text_area(
             "Edit Summary",
@@ -450,8 +448,8 @@ def summary_page():
             help="Edit this to refine the summary used in exports."
         )
 
-        # Save back the edited summary
-        data["summary"] = updated_raw
+        # save back
+        data['summary'] = updated_raw
 
     # -------------------- TAB 4: DECISIONS --------------------
     with tab4:
@@ -520,101 +518,6 @@ def summary_page():
             next_meeting['venue'] = st.text_input("Venue", value=next_meeting.get('venue') or "", key="next_venue")
             next_meeting['agenda'] = st.text_area("Agenda", value=next_meeting.get('agenda') or "", key="next_agenda", height=100)
 
-    # -------------------- TAB 7: INSIGHTS --------------------
-    with tab7:
-        st.markdown("### 🧠 NLP Insights")
-        keywords = data.get('keywords', [])
-        entity_actions = data.get('entity_actions', [])
-
-        if keywords:
-            st.markdown("#### Top Keywords")
-            st.markdown(" ".join([f"`{kw}`" for kw in keywords]))
-        else:
-            st.info("No standout keywords found.")
-
-        st.markdown("---")
-
-        if entity_actions:
-            st.markdown("#### Entity Actions")
-            for idx, item in enumerate(entity_actions, start=1):
-                entity = item.get("entity") or "Unknown"
-                label = item.get("label")
-                action = item.get("action") or "mentioned"
-                obj = item.get("object")
-                snippet = item.get("snippet")
-
-                label_suffix = f" ({label})" if label else ""
-                action_text = f"{action} — {obj}" if obj else action
-
-                st.markdown(f"**{idx}. {entity}{label_suffix}**: {action_text}")
-                if snippet:
-                    st.caption(snippet)
-        else:
-            st.info("No entity-action pairs found.")
-
-def analytics_dashboard_page():
-    st.title("📊 Analytics Dashboard")
-    st.markdown("---")
-    
-    if not st.session_state.processed_data:
-        st.info("👈 No processed data found. Please go to 'Upload & Transcribe' to process a transcript first.")
-        return
-    
-    data = st.session_state.processed_data
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Key Topics", len(data.get('key_topics', [])))
-    with col2:
-        st.metric("Decisions", len(data.get('decisions', [])))
-    with col3:
-        st.metric("Action Items", len(data.get('action_items', [])))
-    with col4:
-        st.metric("Attendees", len(data.get('attendees', [])))
-    
-    st.markdown("---")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### Action Items by Status")
-        action_items = data.get('action_items', [])
-        if action_items:
-            status_counts = {}
-            for item in action_items:
-                status = item.get('status', 'Pending')
-                status_counts[status] = status_counts.get(status, 0) + 1
-            
-            if status_counts:
-                st.bar_chart(status_counts)
-            else:
-                st.info("No action items to display")
-        else:
-            st.info("No action items found")
-    
-    with col2:
-        st.markdown("### Top Keywords")
-        keywords = data.get('keywords', [])
-        if keywords:
-            st.markdown(" ".join([f"`{kw}`" for kw in keywords[:10]]))
-        else:
-            st.info("No keywords extracted")
-    
-    st.markdown("---")
-    st.markdown("### Entity Activity")
-    entity_actions = data.get('entity_actions', [])
-    if entity_actions:
-        entity_counts = {}
-        for item in entity_actions:
-            entity = item.get('entity', 'Unknown')
-            entity_counts[entity] = entity_counts.get(entity, 0) + 1
-        
-        if entity_counts:
-            st.bar_chart(entity_counts)
-    else:
-        st.info("No entity actions found")
-
 def export_page():
     st.title("📥 Export")
     st.markdown("---")
@@ -678,14 +581,6 @@ def export_page():
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True
             )
-    
-def settings_page():
-    st.title("⚙️ Settings")
-    st.markdown("---")
-    
-    st.markdown("### Application Settings")
-    
-    st.info("Settings configuration coming soon. For now, SMTP settings can be configured in the Export page.")
 
 if __name__ == "__main__":
     main()
