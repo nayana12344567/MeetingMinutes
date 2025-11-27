@@ -12,6 +12,6 @@ build/
 .env
 *.log
 .DS_Store
-secrets.toml
+.streamlit/secrets.toml
 *.toml
 *.env
